@@ -50,12 +50,24 @@ class Database
 	 * @param bool $transaction Gibt an, ob die Operation in einer Transaktion ausgeführt werden soll
 	 * @return array Ein Array mit der ID des zuletzt eingefügten Datensatzes und der Anzahl der eingefügten Zeilen
 	 */
-	public function create($table, $data, $transaction = false)
+	public function create($table, $data, $fieldsToEncrypt = [], $transaction = false)
 	{
 		try {
 			if ($transaction) {
 				$this->db->beginTransaction();
 			}
+
+			// Verschlüsselung der angegebenen Felder
+			if (!empty($fieldsToEncrypt)) {
+				$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+				$iv = substr($this->initializationVector, 0, $ivLength);
+				foreach ($fieldsToEncrypt as $field) {
+					if (isset($data[$field])) {
+						$data[$field] = openssl_encrypt($data[$field], $this->encryptionMethod, $this->secretKey, 0, $iv);
+					}
+				}
+			}
+
 			$fields = implode(',', array_keys($data));
 			$placeholders = ':' . implode(', :', array_keys($data));
 			$sql = "INSERT INTO {$table} ({$fields}) VALUES ({$placeholders})";
@@ -68,33 +80,26 @@ class Database
 			if ($transaction) {
 				$this->db->commit();
 			}
-			return [
-				'lastInsertId' => $lastInsertId,
-				'rowCount' => $stmt->rowCount(),
-				'status' => true  // Hinzufügen des Status-Schlüssels
-			];
+			return ['lastInsertId' => $lastInsertId, 'rowCount' => $stmt->rowCount(), 'status' => true];
 		} catch (\PDOException $e) {
 			if ($transaction) {
 				$this->db->rollBack();
 			}
 			error_log($e->getMessage());
-			return [
-				'error' => 'Fehler beim Einfügen des Datensatzes: ' . $e->getMessage(),
-				'status' => false  // Hinzufügen des Status-Schlüssels
-			];
+			return ['error' => 'Fehler beim Einfügen des Datensatzes: ' . $e->getMessage(), 'status' => false];
 		}
 	}
 
 
 	/**
-	 * Erweiterte Funktion zum Abrufen von Datensätzen aus der Datenbank.
-	 * 
+	 * Funktion zum Lesen von Datensätzen aus der Datenbank mit optionaler Entschlüsselung.
+	 *
 	 * @param string $table Der Name der Tabelle
-	 * @param array $options Ein assoziatives Array der Optionen (Felder, Bedingungen, Sortierung, Limit)
-	 * @return array Ein Array der abgerufenen Datensätze
+	 * @param array $options Ein assoziatives Array der Optionen
+	 * @param array $fieldsToDecrypt Ein Array der Felder, die entschlüsselt werden sollen
+	 * @return array Ein Array mit den abgerufenen Daten und dem Status der Operation
 	 */
-	public function read($table, $options = [])
-	{
+	public function read($table,$options = [],$fieldsToDecrypt = []) {
 		try {
 			$fields = $options['fields'] ?? '*';
 			$sql = "SELECT {$fields} FROM {$table}";
@@ -115,8 +120,23 @@ class Database
 				}
 			}
 			$stmt->execute();
+			$data = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+			// Entschlüsselung der spezifizierten Felder
+			if (!empty($fieldsToDecrypt)) {
+				$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+				$iv = substr($this->initializationVector, 0, $ivLength);
+				foreach ($data as $index => $row) {
+					foreach ($fieldsToDecrypt as $field) {
+						if (isset($row[$field])) {
+							$data[$index][$field] = openssl_decrypt($row[$field], $this->encryptionMethod, $this->secretKey, 0, $iv);
+						}
+					}
+				}
+			}
+
 			return [
-				'data' => $stmt->fetchAll(\PDO::FETCH_ASSOC),
+				'data' => $data,
 				'status' => true
 			];
 		} catch (\PDOException $e) {
@@ -134,36 +154,42 @@ class Database
 	 * @param bool $transaction Gibt an, ob die Operation in einer Transaktion ausgeführt werden soll
 	 * @return array Ein Array mit der Anzahl der aktualisierten Zeilen
 	 */
-	public function update($table, $data, $conditions, $transaction = false)
+	// Erweiterte Funktion zum Aktualisieren von Datensätzen in der Datenbank.
+	public function update($table, $data, $conditions, $fieldsToEncrypt = [], $transaction = false)
 	{
 		try {
 			if ($transaction) {
 				$this->db->beginTransaction();
 			}
-			$fields = implode(',',
-				array_map(fn ($key) => "$key = :$key", array_keys($data))
-			);
+
+			// Verschlüsselung der angegebenen Felder
+			if (!empty($fieldsToEncrypt)) {
+				$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+				$iv = substr($this->initializationVector, 0, $ivLength);
+				foreach ($fieldsToEncrypt as $field) {
+					if (isset($data[$field])) {
+						$data[$field] = openssl_encrypt($data[$field], $this->encryptionMethod, $this->secretKey, 0, $iv);
+					}
+				}
+			}
+
+			$fields = implode(',', array_map(fn ($key) => "$key = :$key", array_keys($data)));
 			$sql = "UPDATE {$table} SET {$fields} WHERE " . implode(' AND ', array_map(fn ($key) => "$key = :$key", array_keys($conditions)));
 			$stmt = $this->db->prepare($sql);
-			foreach (array_merge(
-				$data,
-				$conditions
-			) as $key => $value) {
-				$stmt->bindValue(':' . $key,
-					$this->sanitizeInput($value)
-				);
+			foreach (array_merge($data, $conditions) as $key => $value) {
+				$stmt->bindValue(':' . $key, $this->sanitizeInput($value));
 			}
 			$stmt->execute();
 			if ($transaction) {
 				$this->db->commit();
 			}
-			return ['rowCount' => $stmt->rowCount()];
+			return ['rowCount' => $stmt->rowCount(), 'status' => true];
 		} catch (\PDOException $e) {
 			if ($transaction) {
 				$this->db->rollBack();
 			}
 			error_log($e->getMessage());
-			return ['error' => 'Fehler beim Aktualisieren der Datensätze: ' . $e->getMessage()];
+			return ['error' => 'Fehler beim Aktualisieren der Datensätze: ' . $e->getMessage(), 'status' => false];
 		}
 	}
 
@@ -176,12 +202,24 @@ class Database
 	 * @param bool $useOrConditions Gibt an, ob OR-Bedingungen verwendet werden sollen
 	 * @return array Ein Array mit der Anzahl der gelöschten Zeilen und den IDs der gelöschten Datensätze
 	 */
-	public function delete($table, $conditions, $transaction = false, $useOrConditions = false, $suppressLogging = false)
+	public function delete($table, $conditions, $fieldsToEncrypt = [], $transaction = false, $useOrConditions = false, $suppressLogging = false)
 	{
 		try {
 			if ($transaction) {
 				$this->db->beginTransaction();
 			}
+
+			// Verschlüsselung der angegebenen Felder
+			if (!empty($fieldsToEncrypt)) {
+				$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+				$iv = substr($this->initializationVector, 0, $ivLength);
+				foreach ($fieldsToEncrypt as $field) {
+					if (isset($conditions[$field])) {
+						$conditions[$field] = openssl_encrypt($conditions[$field], $this->encryptionMethod, $this->secretKey, 0, $iv);
+					}
+				}
+			}
+
 			$connector = $useOrConditions ? ' OR ' : ' AND ';
 			$sql = "DELETE FROM {$table} WHERE " . implode($connector, array_map(fn ($key) => "$key = :$key", array_keys($conditions)));
 			$stmt = $this->db->prepare($sql);
@@ -209,94 +247,6 @@ class Database
 			return ['error' => 'Fehler beim Löschen der Datensätze: ' . $e->getMessage()];
 		}
 	}
-
-	/**
-	 * Funktion zum Erstellen eines verschlüsselten Datensatzes in der Datenbank.
-	 * 
-	 * @param string $table Der Name der Tabelle
-	 * @param array $data Ein assoziatives Array der Daten
-	 * @return array Ein Array mit dem Status der Operation
-	 */
-	public function createEncrypted($table, $data)
-	{
-		$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
-		$iv = substr($this->initializationVector, 0, $ivLength);
-		foreach ($data as $key => $value) {
-			$data[$key] = openssl_encrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
-		}
-		$result = $this->create($table, $data);
-		$result['status'] = $result['status'] ?? false;
-		return $result;
-	}
-
-
-	/**
-	 * Funktion zum Lesen eines verschlüsselten Datensatzes aus der Datenbank.
-	 * 
-	 * @param string $table Der Name der Tabelle
-	 * @param array $conditions Ein assoziatives Array der Bedingungen
-	 * @return array Ein Array mit dem Status der Operation und den entschlüsselten Daten
-	 */
-	public function readEncrypted($table, $conditions = [])
-	{
-		$result = $this->read($table, $conditions);
-		$result['status'] = $result['status'] ?? false;
-		if ($result['status']) {
-			$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
-			$iv = substr($this->initializationVector, 0, $ivLength);
-			foreach ($result['data'] as $index => $row) {
-				foreach ($row as $key => $value) {
-					$result['data'][$index][$key] = openssl_decrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
-				}
-			}
-		}
-		return $result;
-	}
-
-	/**
-	 * Funktion zum Aktualisieren eines verschlüsselten Datensatzes in der Datenbank.
-	 * 
-	 * @param string $table Der Name der Tabelle
-	 * @param array $data Ein assoziatives Array der zu aktualisiierenden Daten
-	 * @param array $conditions Ein assoziatives Array der Bedingungen
-	 * @return array Ein Array mit dem Status der Operation
-	 */
-	public function updateEncrypted($table, $data, $conditions)
-	{
-		$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
-		$iv = substr($this->initializationVector, 0, $ivLength);
-		foreach ($data as $key => $value) {
-			$data[$key] = openssl_encrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
-		}
-		$result = $this->update($table,
-			$data,
-			$conditions
-		);
-		$result['status'] = $result['status'] ?? false;
-		return $result;
-	}
-
-	/**
-	 * Funktion zum Löschen eines verschlüsselten Datensatzes in der Datenbank.
-	 * 
-	 * @param string $table Der Name der Tabelle
-	 * @param array $conditions Ein assoziatives Array der Bedingungen
-	 * @return array Ein Array mit dem Status der Operation
-	 */
-	public function deleteEncrypted($table, $conditions)
-	{
-		$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
-		$iv = substr($this->initializationVector, 0, $ivLength);
-		foreach ($conditions as $key => $value) {
-			$conditions[$key] = openssl_encrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
-		}
-		$result = $this->delete($table,
-			$conditions
-		);
-		$result['status'] = $result['status'] ?? false;
-		return $result;
-	}
-
 
 	/**
 	 * Gibt die einzige Instanz der Klasse zurück.
