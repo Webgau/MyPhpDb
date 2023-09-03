@@ -1,6 +1,4 @@
 <?php
-// db.class.php
-
 // Namespace für unser Projekt
 namespace MyProject;
 
@@ -19,6 +17,8 @@ class Database
 	private $db;
 	// Geheimer Schlüssel für Verschlüsselung
 	private $secretKey;
+	private $initializationVector;
+	private $encryptionMethod;
 
 	/**
 	 * Konstruktor der Klasse.
@@ -34,6 +34,8 @@ class Database
 			];
 			$this->db = new \PDO($dsn, DB_USER, DB_PASSWORD, $options);
 			$this->secretKey = SECRET_KEY;
+			$this->initializationVector = INITIALIZATION_VECTOR;
+			$this->encryptionMethod = ENCRYPTION_METHOD;
 		} catch (\PDOException $e) {
 			error_log($e->getMessage());
 			die('Datenbankverbindung fehlgeschlagen. Weitere Informationen finden Sie im Fehlerprotokoll.');
@@ -66,15 +68,23 @@ class Database
 			if ($transaction) {
 				$this->db->commit();
 			}
-			return ['lastInsertId' => $lastInsertId, 'rowCount' => $stmt->rowCount()];
+			return [
+				'lastInsertId' => $lastInsertId,
+				'rowCount' => $stmt->rowCount(),
+				'status' => true  // Hinzufügen des Status-Schlüssels
+			];
 		} catch (\PDOException $e) {
 			if ($transaction) {
 				$this->db->rollBack();
 			}
 			error_log($e->getMessage());
-			return ['error' => 'Fehler beim Einfügen des Datensatzes: ' . $e->getMessage()];
+			return [
+				'error' => 'Fehler beim Einfügen des Datensatzes: ' . $e->getMessage(),
+				'status' => false  // Hinzufügen des Status-Schlüssels
+			];
 		}
 	}
+
 
 	/**
 	 * Erweiterte Funktion zum Abrufen von Datensätzen aus der Datenbank.
@@ -105,7 +115,10 @@ class Database
 				}
 			}
 			$stmt->execute();
-			return $stmt->fetchAll(\PDO::FETCH_ASSOC);
+			return [
+				'data' => $stmt->fetchAll(\PDO::FETCH_ASSOC),
+				'status' => true
+			];
 		} catch (\PDOException $e) {
 			error_log($e->getMessage());
 			return ['error' => 'Fehler beim Abrufen der Datensätze: ' . $e->getMessage()];
@@ -116,7 +129,7 @@ class Database
 	 * Erweiterte Funktion zum Aktualisieren von Datensätzen in der Datenbank.
 	 * 
 	 * @param string $table Der Name der Tabelle
-	 * @param array $data Ein assoziatives Array der zu aktualisierenden Daten
+	 * @param array $data Ein assoziatives Array der zu aktualisiierenden Daten
 	 * @param array $conditions Ein assoziatives Array der Bedingungen
 	 * @param bool $transaction Gibt an, ob die Operation in einer Transaktion ausgeführt werden soll
 	 * @return array Ein Array mit der Anzahl der aktualisierten Zeilen
@@ -127,14 +140,18 @@ class Database
 			if ($transaction) {
 				$this->db->beginTransaction();
 			}
-			$fields = implode(',', array_map(fn ($key) => "$key = :$key", array_keys($data)));
+			$fields = implode(',',
+				array_map(fn ($key) => "$key = :$key", array_keys($data))
+			);
 			$sql = "UPDATE {$table} SET {$fields} WHERE " . implode(' AND ', array_map(fn ($key) => "$key = :$key", array_keys($conditions)));
 			$stmt = $this->db->prepare($sql);
 			foreach (array_merge(
 				$data,
 				$conditions
 			) as $key => $value) {
-				$stmt->bindValue(':' . $key, $this->sanitizeInput($value));
+				$stmt->bindValue(':' . $key,
+					$this->sanitizeInput($value)
+				);
 			}
 			$stmt->execute();
 			if ($transaction) {
@@ -193,6 +210,93 @@ class Database
 		}
 	}
 
+	/**
+	 * Funktion zum Erstellen eines verschlüsselten Datensatzes in der Datenbank.
+	 * 
+	 * @param string $table Der Name der Tabelle
+	 * @param array $data Ein assoziatives Array der Daten
+	 * @return array Ein Array mit dem Status der Operation
+	 */
+	public function createEncrypted($table, $data)
+	{
+		$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+		$iv = substr($this->initializationVector, 0, $ivLength);
+		foreach ($data as $key => $value) {
+			$data[$key] = openssl_encrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
+		}
+		$result = $this->create($table, $data);
+		$result['status'] = $result['status'] ?? false;
+		return $result;
+	}
+
+
+	/**
+	 * Funktion zum Lesen eines verschlüsselten Datensatzes aus der Datenbank.
+	 * 
+	 * @param string $table Der Name der Tabelle
+	 * @param array $conditions Ein assoziatives Array der Bedingungen
+	 * @return array Ein Array mit dem Status der Operation und den entschlüsselten Daten
+	 */
+	public function readEncrypted($table, $conditions = [])
+	{
+		$result = $this->read($table, $conditions);
+		$result['status'] = $result['status'] ?? false;
+		if ($result['status']) {
+			$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+			$iv = substr($this->initializationVector, 0, $ivLength);
+			foreach ($result['data'] as $index => $row) {
+				foreach ($row as $key => $value) {
+					$result['data'][$index][$key] = openssl_decrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
+				}
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Funktion zum Aktualisieren eines verschlüsselten Datensatzes in der Datenbank.
+	 * 
+	 * @param string $table Der Name der Tabelle
+	 * @param array $data Ein assoziatives Array der zu aktualisiierenden Daten
+	 * @param array $conditions Ein assoziatives Array der Bedingungen
+	 * @return array Ein Array mit dem Status der Operation
+	 */
+	public function updateEncrypted($table, $data, $conditions)
+	{
+		$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+		$iv = substr($this->initializationVector, 0, $ivLength);
+		foreach ($data as $key => $value) {
+			$data[$key] = openssl_encrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
+		}
+		$result = $this->update($table,
+			$data,
+			$conditions
+		);
+		$result['status'] = $result['status'] ?? false;
+		return $result;
+	}
+
+	/**
+	 * Funktion zum Löschen eines verschlüsselten Datensatzes in der Datenbank.
+	 * 
+	 * @param string $table Der Name der Tabelle
+	 * @param array $conditions Ein assoziatives Array der Bedingungen
+	 * @return array Ein Array mit dem Status der Operation
+	 */
+	public function deleteEncrypted($table, $conditions)
+	{
+		$ivLength = openssl_cipher_iv_length($this->encryptionMethod);
+		$iv = substr($this->initializationVector, 0, $ivLength);
+		foreach ($conditions as $key => $value) {
+			$conditions[$key] = openssl_encrypt($value, $this->encryptionMethod, $this->secretKey, 0, $iv);
+		}
+		$result = $this->delete($table,
+			$conditions
+		);
+		$result['status'] = $result['status'] ?? false;
+		return $result;
+	}
+
 
 	/**
 	 * Gibt die einzige Instanz der Klasse zurück.
@@ -206,15 +310,6 @@ class Database
 			self::$instance = new Database();
 		}
 		return self::$instance;
-	}
-
-	/**
-	 * Methode zum Testen der Datenbankverbindung.
-	 * Die Implementierung erfolgt später.
-	 */
-	public function testConnection()
-	{
-		// Code zum Testen der Datenbankverbindung wird später hinzugefügt
 	}
 
 	/**
