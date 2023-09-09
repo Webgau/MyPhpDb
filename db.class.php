@@ -50,8 +50,12 @@ class Database
 	 * @param bool $transaction Gibt an, ob die Operation in einer Transaktion ausgeführt werden soll
 	 * @return array Ein Array mit der ID des zuletzt eingefügten Datensatzes und der Anzahl der eingefügten Zeilen
 	 */
-	public function create($table, $data, $fieldsToEncrypt = [], $transaction = false)
-	{
+	public function create($table, $data, $fieldsToEncrypt = [], $transaction = false, $csrfToken = '') {
+		// CSRF Token Überprüfung
+		if (!$this->verifyCsrfToken($csrfToken)) {
+			return ['error' => 'Ungültiger CSRF-Token', 'status' => false];
+		}
+
 		try {
 			if ($transaction) {
 				$this->db->beginTransaction();
@@ -68,7 +72,7 @@ class Database
 				}
 			}
 
-			$fields = implode(',', array_keys($data));
+			$fields = implode(',',array_keys($data));
 			$placeholders = ':' . implode(', :', array_keys($data));
 			$sql = "INSERT INTO {$table} ({$fields}) VALUES ({$placeholders})";
 			$stmt = $this->db->prepare($sql);
@@ -151,12 +155,17 @@ class Database
 	 * @param string $table Der Name der Tabelle
 	 * @param array $data Ein assoziatives Array der zu aktualisiierenden Daten
 	 * @param array $conditions Ein assoziatives Array der Bedingungen
+	 * @param array $fieldsToEncrypt Ein Array der Felder, die verschlüsselt werden sollen
 	 * @param bool $transaction Gibt an, ob die Operation in einer Transaktion ausgeführt werden soll
-	 * @return array Ein Array mit der Anzahl der aktualisierten Zeilen
+	 * @param string $csrfToken Der CSRF-Token, der mit dem in der Session gespeicherten Token verglichen wird
+	 * @return array Ein Array mit der Anzahl der aktualisierten Zeilen und dem Status der Operation
 	 */
-	// Erweiterte Funktion zum Aktualisieren von Datensätzen in der Datenbank.
-	public function update($table, $data, $conditions, $fieldsToEncrypt = [], $transaction = false)
+	public function update($table, $data, $conditions, $fieldsToEncrypt = [], $transaction = false, $csrfToken)
 	{
+		// Überprüfen Sie zuerst den CSRF-Token
+		if (!isset($_SESSION['csrf_token']) || $_SESSION['csrf_token'] !== $csrfToken) {
+			return ['error' => 'Ungültiger CSRF-Token.', 'status' => false];
+		}
 		try {
 			if ($transaction) {
 				$this->db->beginTransaction();
@@ -277,15 +286,41 @@ class Database
 	}
 
 	/**
-	 * Hilfsfunktion zur Verschlüsselung von Daten.
+	 * Escapes HTML output to prevent XSS attacks.
 	 * 
-	 * @param string $data Die zu verschlüsselnden Daten
-	 * @return string Die verschlüsselten Daten
+	 * @param string $output The string to be escaped.
+	 * @return string The escaped string.
 	 */
-	private function encryptData($data)
+	public function escapeOutput($output)
 	{
-		// Verschlüsselungslogik wird später hinzugefügt
-		return $data;
+		return htmlspecialchars($output, ENT_QUOTES, 'UTF-8');
+	}
+
+	/**
+	 * Generates and stores a CSRF token in the session.
+	 * 
+	 * @return void
+	 */
+	public function generateCsrfToken()
+	{
+		if (!session_id()) {
+			session_start();
+		}
+		$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+	}
+
+	/**
+	 * Verifies the CSRF token.
+	 * 
+	 * @param string $token The CSRF token to be verified.
+	 * @return bool True if the token is valid, otherwise false.
+	 */
+	public function verifyCsrfToken($token)
+	{
+		if (!session_id()) {
+			session_start();
+		}
+		return hash_equals($_SESSION['csrf_token'] ?? '', $token);
 	}
 
 	// Weitere Funktionen und Methoden werden hier hinzugefügt
